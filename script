@@ -1,8 +1,3 @@
-library(Seurat)
-library(ggplot2)
-library(dplyr)
-library(forcats)
-
 RunSeurat <- function(obj, n = 4, dc, np,  resol, spli, intemethod = RPCAIntegration) {
   DefaultAssay(obj) <- "decontXcounts"
   obj[["decontXcounts"]] <- split(obj[["decontXcounts"]], f = obj@meta.data[[spli]])
@@ -26,6 +21,84 @@ RunSeurat <- function(obj, n = 4, dc, np,  resol, spli, intemethod = RPCAIntegra
 }
 
 
+
+cell_key <- paste(ovary_sce$Donor, ovary_sce[[ob_group]], sep = "___CELLTYPE___")
+ovary_sce$nCells <- as.numeric(table(cell_key)[cell_key])
+
+pb <- dreamlet::aggregateToPseudoBulk(
+  ovary_sce,
+  assay = "counts", cluster_id = ob_group, sample_id = "Donor",
+  verbose = TRUE
+)
+pb$Age <- suppressWarnings(as.numeric(as.character(pb$Age)))
+pb$data_source <- droplevels(factor(as.character(pb$data_source)))
+
+pb$Age10 <- (pb$Age - mean(pb$Age)) / 10
+
+
+derive_hidden_pc1 <- function(pb, min_count, min_prop) {
+  full_counts <- Reduce(`+`, lapply(assayNames(pb), function(ct) assay(pb, ct)))
+  meta <- as.data.frame(colData(pb))
+  donor_ids <- if ("Donor" %in% names(meta)) as.character(meta$Donor) else rownames(meta)
+  idx <- match(colnames(full_counts), donor_ids)
+  meta <- meta[idx, , drop = FALSE]
+  rownames(meta) <- colnames(full_counts)
+
+  keep_gene <- Matrix::rowSums(full_counts >= min_count) >=
+    ceiling(min_prop * ncol(full_counts))
+
+  design_known <- model.matrix(~ Age10 + data_source, data = meta)
+  if (qr(design_known)$rank < ncol(design_known)) {
+    stop("Age10 + data_source design matrix is rank-deficient")
+  }
+
+  dge_full <- edgeR::DGEList(counts = as.matrix(full_counts[keep_gene, , drop = FALSE]))
+  dge_full <- edgeR::calcNormFactors(dge_full, method = "TMM")
+  voom_full <- limma::voom(dge_full, design = design_known, plot = FALSE)
+
+
+  expression_corrected <- limma::removeBatchEffect(
+    voom_full,
+    covariates = design_known[, colnames(design_known) != "(Intercept)", drop = FALSE]
+  )
+  pca_fit <- prcomp(t(expression_corrected), center = TRUE, scale. = FALSE)
+  list(
+    PC1 = pca_fit$x[, "PC1"],
+    PC1_variance = pca_fit$sdev[1]^2 / sum(pca_fit$sdev^2),
+    pca = pca_fit, metadata = meta, n_genes = sum(keep_gene)
+  )
+}
+
+pc1_result <- derive_hidden_pc1(pb, min_count, min_prop)
+pb_meta <- as.data.frame(colData(pb))
+pb_donor <- if ("Donor" %in% names(pb_meta)) as.character(pb_meta$Donor) else rownames(pb_meta)
+idx_pc1 <- match(pb_donor, names(pc1_result$PC1))
+
+pb$PC1_hidden <- unname(pc1_result$PC1[idx_pc1])
+stopifnot(length(pb$PC1_hidden) == ncol(pb), !anyNA(pb$PC1_hidden))
+
+
+
+form_pc1 <- ~ Age10 + data_source + PC1_hidden
+design_pc1 <- model.matrix(form_pc1, data = as.data.frame(colData(pb)))
+if (qr(design_pc1)$rank < ncol(design_pc1)) {
+  stop("Age10 + data_source + PC1_hidden design matrix is rank-deficient")
+}
+bp <- BiocParallel::MulticoreParam(workers = 8, progressbar = TRUE)
+
+res.proc_pc1 <- dreamlet::processAssays(
+  pb, formula = form_pc1,
+  min.cells, min.count, min.samples, min.prop,
+  normalize.method = "TMM", BPPARAM = bp
+)
+fit_age_pc1 <- dreamlet::dreamlet(res.proc_pc1, formula = form_pc1, BPPARAM = bp)
+age_result_pc1 <- as.data.frame(dreamlet::topTable(
+  fit_age_pc1, coef = "Age10", number = Inf,
+  adjust.method = "BH", sort.by = "none"
+))
+
+
+
 plot_data <- ovary_seurat@meta.data %>%
   select(CELL_3_10V3, data_source_brief) %>%
   mutate(CELL_3_10V3 = case_when(
@@ -37,21 +110,14 @@ plot_data <- ovary_seurat@meta.data %>%
   ))
 
 cell_order <- c(
-
   "T cell", "NK cell", "Macrophage", "Plasma cell", "cDC", "pDC",
-
   "mural granulosa cell", "cumulus granulosa cell", "atretic granulosa cell",
-
   "Blood endothelial cell", "Lymphatic endothelial cell",
- 
   "Stromal_C0", "Stromal_C1", "Stromal_C2", "Stromal_C3", "Smooth muscle cell", "Theca cell",
-
   "Epithelial cell", "Oocyte"
 )
 
 plot_data$CELL_3_10V3 <- factor(plot_data$CELL_3_10V3, levels = rev(cell_order))
-
-
 custom_colors <- c(
   "Zhang et al., 2026"   = "#93CBB2",
   "Jin et al., 2025"     = "#3D5277",
@@ -67,31 +133,23 @@ custom_colors <- c(
 
 
 p <- ggplot(plot_data, aes(y = CELL_3_10V3, fill = data_source_brief)) +
-
   geom_bar(position = "fill", width = 0.8) +
-
   scale_x_continuous(
     labels = function(x) x * 100, 
     breaks = c(0, 0.25, 0.50, 0.75, 1),
     expand = c(0, 0)
   ) +
-
   scale_fill_manual(values = custom_colors) +
-
   labs(y = "Cell Type", x = "Percentage", fill = "Data Source") +
-
   theme_classic() +
   theme(
-
     text = element_text(size = 8, color = "black"),
     axis.text = element_text(size = 8, color = "black"),
     axis.title = element_text(size = 8, face = "bold"),
     legend.text = element_text(size = 8),
     legend.title = element_text(size = 8, face = "bold"),
- 
     legend.key.size = unit(3, "mm"),
     legend.margin = margin(l = -5),
-    
     axis.line = element_line(color = "black", linewidth = 0.5),
     axis.ticks = element_line(color = "black", linewidth = 0.5)
   )
