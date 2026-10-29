@@ -1,0 +1,101 @@
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(forcats)
+
+RunSeurat <- function(obj, n = 4, dc, np,  resol, spli, intemethod = RPCAIntegration) {
+  DefaultAssay(obj) <- "decontXcounts"
+  obj[["decontXcounts"]] <- split(obj[["decontXcounts"]], f = obj@meta.data[[spli]])
+  plan("multicore", workers = n)
+  obj <- NormalizeData(obj)
+  VariableFeatures(obj) <- consensus_features
+  obj <- ScaleData(obj)
+  plan("sequential")
+  obj <- RunPCA(obj,npcs = np)
+  plan("multicore", workers = n)
+  redution_name <- paste0(deparse(substitute(intemethod)), "_", spli)
+  obj <- IntegrateLayers(object = obj, method = intemethod, orig.reduction = "pca",
+      new.reduction = redution_name, verbose = FALSE)
+  plan("sequential")
+  obj <- JoinLayers(obj)
+  obj <- FindNeighbors(obj, reduction = redution_name, dims = 1:np)
+  obj <- FindClusters(obj, resolution = resol, cluster.name = paste0(redution_name, "_", deparse(substitute(resol)), "_", deparse(substitute(np)), "_clusters"))
+  obj <- RunUMAP(obj, reduction = redution_name, reduction.name = paste0("umap.", redution_name),dims = 1:np)
+  plan("sequential")
+  return(obj)
+}
+
+
+plot_data <- ovary_seurat@meta.data %>%
+  select(CELL_3_10V3, data_source_brief) %>%
+  mutate(CELL_3_10V3 = case_when(
+    CELL_3_10V3 == "c0" ~ "Stromal_C0",
+    CELL_3_10V3 == "c1" ~ "Stromal_C1",
+    CELL_3_10V3 == "c2" ~ "Stromal_C2",
+    CELL_3_10V3 == "c3" ~ "Stromal_C3",
+    TRUE ~ as.character(CELL_3_10V3)
+  ))
+
+cell_order <- c(
+
+  "T cell", "NK cell", "Macrophage", "Plasma cell", "cDC", "pDC",
+
+  "mural granulosa cell", "cumulus granulosa cell", "atretic granulosa cell",
+
+  "Blood endothelial cell", "Lymphatic endothelial cell",
+ 
+  "Stromal_C0", "Stromal_C1", "Stromal_C2", "Stromal_C3", "Smooth muscle cell", "Theca cell",
+
+  "Epithelial cell", "Oocyte"
+)
+
+plot_data$CELL_3_10V3 <- factor(plot_data$CELL_3_10V3, levels = rev(cell_order))
+
+
+custom_colors <- c(
+  "Zhang et al., 2026"   = "#93CBB2",
+  "Jin et al., 2025"     = "#3D5277",
+  "Wu et al., 2024"      = "#EBA689",
+  "Llonch et al., 2021"  = "#A6927E",
+  "Wagner et al., 2020"  = "#46A6C3",
+  "Gaylord et al., 2025" = "#DF5642",
+  "Jones et al., 2024"   = "#7A87A6",
+  "Lengyel et al., 2022" = "#947A95",
+  "Yuan et al., 2021"    = "#81604F",
+  "Fan et al., 2019"     = "#0C8D7A"
+)
+
+
+p <- ggplot(plot_data, aes(y = CELL_3_10V3, fill = data_source_brief)) +
+
+  geom_bar(position = "fill", width = 0.8) +
+
+  scale_x_continuous(
+    labels = function(x) x * 100, 
+    breaks = c(0, 0.25, 0.50, 0.75, 1),
+    expand = c(0, 0)
+  ) +
+
+  scale_fill_manual(values = custom_colors) +
+
+  labs(y = "Cell Type", x = "Percentage", fill = "Data Source") +
+
+  theme_classic() +
+  theme(
+
+    text = element_text(size = 8, color = "black"),
+    axis.text = element_text(size = 8, color = "black"),
+    axis.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 8, face = "bold"),
+ 
+    legend.key.size = unit(3, "mm"),
+    legend.margin = margin(l = -5),
+    
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5)
+  )
+
+
+
+
